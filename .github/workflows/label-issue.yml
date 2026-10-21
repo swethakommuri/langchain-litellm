@@ -1,0 +1,90 @@
+name: Label issue
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  label:
+    # Skip bot-authored issues.
+    if: github.event.issue.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Apply rule-based labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const issue_number = issue.number;
+
+            // Hard-coded allowlist: the only labels this workflow can ever add.
+            // breaking, regression, security and good first issue stay manual.
+            const RULES = {
+              question: {
+                title: [/\?\s*$/, /^\s*(how (do|can|to)|is (it|there) (possible|a way)|can i|does)\b/i],
+                body: [/\bhow (do|can) i\b/i, /\bis (it|there) (possible|a way)\b/i],
+              },
+              docs: {
+                title: [/\b(docs|documentation|readme|docstrings?)\b/i],
+                body: [/\b(the )?(docs|documentation|readme) (is|are|says|example)\b/i, /docs\.langchain\.com\S*litellm/i],
+              },
+              upstream: {
+                title: [/\bupstream\b/i],
+                body: [
+                  /github\.com\/BerriAI\/litellm\/(issues|pull)\/\d+/i,
+                  /\b(reproduces|happens|same) (with|in|using) (plain |raw )?litellm\b/i,
+                  /\bupstream (bug|issue)\b/i,
+                ],
+              },
+            };
+            const MAX_LABELS = 2;
+
+            // Template text that would otherwise trigger rules on every issue.
+            const SKIP_SECTIONS = new Set(['checked other resources', 'system info']);
+
+            function clean(body) {
+              let text = (body ?? '')
+                .replace(/(```|~~~)[\s\S]*?\1/g, ' ')   // fenced code, tracebacks
+                .replace(/`[^`\n]*`/g, ' ')              // inline code
+                .replace(/<!--[\s\S]*?-->/g, ' ');       // HTML comments
+              const kept = [];
+              let skip = false;
+              for (const line of text.split('\n')) {
+                const h = line.match(/^#{1,6}\s+(.*)$/);
+                if (h) { skip = SKIP_SECTIONS.has(h[1].trim().toLowerCase()); continue; }
+                if (skip) continue;
+                if (/^\s*[-*]\s+\[[ xX]\]/.test(line)) continue;  // template checkboxes
+                if (/^\s*(File "|Traceback|\s+at\s)/.test(line)) continue; // unfenced traces
+                kept.push(line);
+              }
+              return kept.join('\n');
+            }
+
+            const title = issue.title ?? '';
+            const body = clean(issue.body);
+            const current = new Set((issue.labels ?? []).map(l => l.name));
+
+            const matched = [];
+            for (const [label, r] of Object.entries(RULES)) {
+              if (r.title.some(re => re.test(title)) || r.body.some(re => re.test(body))) {
+                matched.push(label);
+              }
+            }
+
+            // A bug-template issue is already classified; don't stack question on it.
+            const desired = matched
+              .filter(l => !(l === 'question' && current.has('bug')))
+              .filter(l => !current.has(l))
+              .slice(0, MAX_LABELS);
+
+            if (desired.length) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number, labels: desired });
+            }
+            core.info(`#${issue_number}: +[${desired}]`);
